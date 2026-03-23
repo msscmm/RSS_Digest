@@ -3,3 +3,7 @@ logs/
 __pycache__/
 *.log
 .env
+logs/
+config.env
+sent_articles.json
+source_report.csv
