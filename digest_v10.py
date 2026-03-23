@@ -12,28 +12,37 @@ import feedparser
 import requests
 from dotenv import load_dotenv
 
-load_dotenv("config.env")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(_BASE_DIR)
+load_dotenv(os.path.join(_BASE_DIR, "config.env"))
 
-GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
-FRESHRSS_URLS       = [u.strip() for u in os.getenv("FRESHRSS_URLS", "").split(",") if u.strip()]
-MAX_ITEMS_PER_FEED  = int(os.getenv("MAX_ITEMS_PER_FEED", "200"))
-DEDUP_THRESHOLD     = float(os.getenv("DEDUP_THRESHOLD", "0.78"))
-OUTPUT_DIR          = os.getenv("OUTPUT_DIR", "output").strip()
-SEND_TELEGRAM       = os.getenv("SEND_TELEGRAM", "false").lower() == "true"
-TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-MAX_PUSH_ITEMS      = int(os.getenv("MAX_PUSH_ITEMS", "15"))
-RECENT_HOURS        = int(os.getenv("RECENT_HOURS", "24"))
-MIN_ARTICLE_SCORE   = int(os.getenv("MIN_ARTICLE_SCORE", "0"))
-SENT_FILE           = os.getenv("SENT_FILE", "sent_articles.json").strip()
+GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL         = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+FRESHRSS_URLS        = [u.strip() for u in os.getenv("FRESHRSS_URLS", "").split(",") if u.strip()]
+MAX_ITEMS_PER_FEED   = int(os.getenv("MAX_ITEMS_PER_FEED", "200"))
+DEDUP_THRESHOLD      = float(os.getenv("DEDUP_THRESHOLD", "0.78"))
+OUTPUT_DIR           = os.getenv("OUTPUT_DIR", "output").strip()
+SEND_TELEGRAM        = os.getenv("SEND_TELEGRAM", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+MAX_PUSH_ITEMS       = int(os.getenv("MAX_PUSH_ITEMS", "15"))
+RECENT_HOURS         = int(os.getenv("RECENT_HOURS", "24"))
+MIN_ARTICLE_SCORE    = int(os.getenv("MIN_ARTICLE_SCORE", "0"))
+SENT_FILE            = os.getenv("SENT_FILE", "sent_articles.json").strip()
 SENT_RETENTION_HOURS = int(os.getenv("SENT_RETENTION_HOURS", "72"))
-LLM_RANK_LIMIT      = int(os.getenv("LLM_RANK_LIMIT", str(max(MAX_PUSH_ITEMS * 4, 50))))
-MIN_COMPANY_ITEMS   = int(os.getenv("MIN_COMPANY_ITEMS", "8"))
-MIN_AI_ITEMS        = int(os.getenv("MIN_AI_ITEMS", "8"))
-MIN_BLOG_ITEMS      = int(os.getenv("MIN_BLOG_ITEMS", "5"))
-HTTP_TIMEOUT        = int(os.getenv("HTTP_TIMEOUT", "25"))
-TELEGRAM_MAX_CHARS  = int(os.getenv("TELEGRAM_MAX_CHARS", "3900"))
+LLM_RANK_LIMIT       = int(os.getenv("LLM_RANK_LIMIT", str(max(MAX_PUSH_ITEMS * 4, 60))))
+MIN_COMPANY_ITEMS    = int(os.getenv("MIN_COMPANY_ITEMS", "8"))
+MIN_AI_ITEMS         = int(os.getenv("MIN_AI_ITEMS", "8"))
+MIN_BLOG_ITEMS       = int(os.getenv("MIN_BLOG_ITEMS", "5"))
+HTTP_TIMEOUT         = int(os.getenv("HTTP_TIMEOUT", "25"))
+TELEGRAM_MAX_CHARS   = int(os.getenv("TELEGRAM_MAX_CHARS", "3900"))
+
+# v10 新增常量
+MAX_BLOG_PRE_FILTER      = int(os.getenv("MAX_BLOG_PRE_FILTER", "40"))
+TOP_FULLTEXT             = int(os.getenv("TOP_FULLTEXT", "30"))
+RAW_FEED_LIMIT           = int(os.getenv("RAW_FEED_LIMIT", "50"))
+TELEGRAM_RAW_BOT_TOKEN   = os.getenv("TELEGRAM_RAW_BOT_TOKEN", "").strip()
+TELEGRAM_RAW_CHAT_ID     = os.getenv("TELEGRAM_RAW_CHAT_ID", "").strip()
 
 AI_KEYWORDS = [
     "ai", "llm", "gpt", "claude", "openai", "anthropic", "deepmind",
@@ -426,6 +435,24 @@ def filter_already_sent(articles: list[dict], sent_store: dict) -> list[dict]:
     return result
 
 
+# v10: 快速预过滤，防止博客文章挤占 LLM ranking 配额
+def fast_filter(articles: list[dict]) -> list[dict]:
+    core = []   # company + AI + media（全保）
+    blogs = []  # blog（限量）
+    for a in articles:
+        text = (a.get("title", "") + " " + a.get("summary", "")).lower()
+        if detect_company(a) or any(k in text for k in AI_KEYWORDS) \
+                or a.get("source_type") == "media":
+            core.append(a)
+        elif a.get("source_type") == "blog":
+            blogs.append(a)
+        # source_type=="other" 且不含公司/AI关键词：丢弃
+    blogs.sort(key=lambda x: x.get("published_dt") or datetime.datetime.min, reverse=True)
+    result = core + blogs[:MAX_BLOG_PRE_FILTER]
+    print(f"[{now_str()}] [FAST FILTER] {len(articles)} → {len(result)} (core={len(core)}, blog≤{MAX_BLOG_PRE_FILTER})")
+    return result
+
+
 # ── Tagging + scoring ───────────────────────────────────────────
 
 def detect_company(article: dict) -> str | None:
@@ -483,18 +510,25 @@ def call_gemini(prompt: str) -> str:
         "https://generativelanguage.googleapis.com/v1beta/"
         f"models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
-    resp = requests.post(
-        url,
-        headers={"Content-Type": "application/json"},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        raise RuntimeError("Gemini 响应解析失败：\n" + json.dumps(data, ensure_ascii=False, indent=2))
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                import time
+                print(f"[WARN] Gemini attempt {attempt + 1} failed ({e}), retrying...")
+                time.sleep(2)
+    raise RuntimeError(f"Gemini 失败（3次重试后）: {last_err}")
 
 
 def llm_tag_and_rank(articles: list[dict], limit: int | None = None) -> list[dict]:
@@ -621,15 +655,32 @@ def reserve_diverse_articles(ranked: list[dict]) -> list[dict]:
     return selected
 
 
+# ── v10: Full text fetch ─────────────────────────────────────────
+
+def fetch_full_text(url: str) -> str:
+    try:
+        from newspaper import Article, Config
+        cfg = Config()
+        cfg.request_timeout = HTTP_TIMEOUT
+        art = Article(url, config=cfg)
+        art.download()
+        art.parse()
+        return art.text[:5000]
+    except Exception:
+        return ""
+
+
 # ── Headline generation ─────────────────────────────────────────
 
 def build_company_grouped_headlines(articles: list[dict], ai_mode: bool = False) -> list[dict]:
     lines = []
     for i, a in enumerate(articles, 1):
+        # v10: 优先使用全文，回退到 summary
+        content = a.get("full_text") or a.get("summary") or ""
         lines.append(
             f"{i}. [分类: {a.get('company_tag', '市场动态')}]\n"
             f"   标题: {a['title']}\n"
-            f"   摘要: {a['summary']}\n"
+            f"   摘要: {content[:2000]}\n"
             f"   来源: {a.get('source_display') or a.get('source')}\n"
             f"   链接: {a['link']}"
         )
@@ -867,11 +918,78 @@ def send_four_messages(
             send_telegram(f"📖 <b>博客精选</b> {today}\n\n" + blog_text)
 
 
+# v10: Bot1 原始 feed 推送（多条消息分批，按时间倒序）
+def send_raw_feed(articles: list[dict]):
+    token = TELEGRAM_RAW_BOT_TOKEN
+    chat_id = TELEGRAM_RAW_CHAT_ID
+    if not token or not chat_id:
+        print("[BOT1 RAW] skipped (no TELEGRAM_RAW_BOT_TOKEN/CHAT_ID configured)")
+        return
+
+    sorted_arts = sorted(
+        articles,
+        key=lambda x: x.get("published_dt") or datetime.datetime.min,
+        reverse=True,
+    )[:RAW_FEED_LIMIT]
+
+    today = now_local().strftime("%Y-%m-%d")
+    header = f"📰 <b>最新资讯</b> {today}（{len(sorted_arts)} 条）\n\n"
+
+    lines = []
+    for a in sorted_arts:
+        title = escape_html(a["title"])
+        source = escape_html(a.get("source_display") or a.get("source", ""))
+        link = a.get("link", "")
+        if link:
+            lines.append(f'• {title}（<a href="{html.escape(link, quote=True)}">{source}</a>）')
+        else:
+            lines.append(f"• {title}（{source}）")
+
+    # 分批发送，每批不超过 TELEGRAM_MAX_CHARS
+    current = header
+    sent_count = 0
+    for line in lines:
+        addition = line + "\n"
+        if len(current) + len(addition) > TELEGRAM_MAX_CHARS and current.strip():
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": current.strip(),
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=15,
+                ).raise_for_status()
+                sent_count += 1
+            except Exception as e:
+                print(f"[BOT1 RAW] Send error: {e}")
+            current = ""
+        current += addition
+
+    if current.strip():
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": current.strip(),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            ).raise_for_status()
+            sent_count += 1
+        except Exception as e:
+            print(f"[BOT1 RAW] Send error: {e}")
+
+    print(f"[BOT1 RAW] Sent {len(sorted_arts)} articles in {sent_count} message(s)")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 def main():
-    # Ensure we run from the script's own directory so config.env is always found.
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     ensure_dirs()
     import logging
     logging.basicConfig(
@@ -879,7 +997,7 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    logging.info("=== digest start ===")
+    logging.info("=== digest v10 start ===")
     if not FRESHRSS_URLS:
         raise EnvironmentError("请在 config.env 中设置 FRESHRSS_URLS")
 
@@ -894,7 +1012,14 @@ def main():
         print(f"[{now_str()}] No new articles to push.")
         return
 
-    ranked = llm_tag_and_rank(articles_new)
+    # Bot1: 发送原始 feed（全量新文章，未经 fast_filter）
+    if SEND_TELEGRAM:
+        send_raw_feed(articles_new)
+
+    # v10: fast_filter 防止博客挤占 LLM 配额
+    articles_filtered = fast_filter(articles_new)
+
+    ranked = llm_tag_and_rank(articles_filtered)
 
     if MIN_ARTICLE_SCORE > 0:
         ranked = [a for a in ranked if a.get("score", 0) >= MIN_ARTICLE_SCORE]
@@ -903,6 +1028,13 @@ def main():
     if not ranked:
         print(f"[{now_str()}] No articles passed quality gate, skipping.")
         return
+
+    # v10: 对 top N 篇文章抓取全文，供 Gemini headline 使用
+    print(f"[{now_str()}] Fetching full text for top {TOP_FULLTEXT} articles...")
+    for a in ranked[:TOP_FULLTEXT]:
+        a["full_text"] = fetch_full_text(a["link"])
+    fulltext_ok = sum(1 for a in ranked[:TOP_FULLTEXT] if a.get("full_text"))
+    print(f"[{now_str()}] Full text fetched: {fulltext_ok}/{min(TOP_FULLTEXT, len(ranked))} articles")
 
     ranked = reserve_diverse_articles(ranked)
 

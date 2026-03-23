@@ -1,0 +1,152 @@
+{
+  "reuters.com": {
+    "count": 2,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "theverge.com": {
+    "count": 5,
+    "company_hits": 0,
+    "ai_hits": 3,
+    "media_hits": 3
+  },
+  "simonwillison.net": {
+    "count": 6,
+    "company_hits": 2,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "news.google.com": {
+    "count": 50,
+    "company_hits": 38,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "engadget.com": {
+    "count": 4,
+    "company_hits": 0,
+    "ai_hits": 1,
+    "media_hits": 2
+  },
+  "theinformation.com": {
+    "count": 2,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "techcrunch.com": {
+    "count": 9,
+    "company_hits": 2,
+    "ai_hits": 3,
+    "media_hits": 6
+  },
+  "techbuzz.ai": {
+    "count": 9,
+    "company_hits": 2,
+    "ai_hits": 5,
+    "media_hits": 0
+  },
+  "gizmodo.com": {
+    "count": 7,
+    "company_hits": 0,
+    "ai_hits": 2,
+    "media_hits": 6
+  },
+  "nesbitt.io": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "oldvcr.blogspot.com": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "bloomberg.com": {
+    "count": 18,
+    "company_hits": 4,
+    "ai_hits": 5,
+    "media_hits": 17
+  },
+  "scmp.com": {
+    "count": 48,
+    "company_hits": 16,
+    "ai_hits": 18,
+    "media_hits": 0
+  },
+  "wired.com": {
+    "count": 10,
+    "company_hits": 4,
+    "ai_hits": 1,
+    "media_hits": 10
+  },
+  "asia.nikkei.com": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 1,
+    "media_hits": 0
+  },
+  "berthub.eu": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 1,
+    "media_hits": 0
+  },
+  "shkspr.mobi": {
+    "count": 2,
+    "company_hits": 2,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "venturebeat.com": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 1,
+    "media_hits": 0
+  },
+  "joanwestenberg.com": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "pandaily.com": {
+    "count": 2,
+    "company_hits": 1,
+    "ai_hits": 1,
+    "media_hits": 0
+  },
+  "technode.com": {
+    "count": 2,
+    "company_hits": 2,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "e27.co": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 1,
+    "media_hits": 0
+  },
+  "pluralistic.net": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 1,
+    "media_hits": 0
+  },
+  "blog.jim-nielsen.com": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  },
+  "geohot.github.io": {
+    "count": 1,
+    "company_hits": 0,
+    "ai_hits": 0,
+    "media_hits": 0
+  }
+}

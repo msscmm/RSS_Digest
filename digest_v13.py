@@ -4,6 +4,8 @@ import json
 import html
 import hashlib
 import datetime
+from collections import defaultdict
+
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 from rapidfuzz import fuzz
@@ -12,28 +14,50 @@ import feedparser
 import requests
 from dotenv import load_dotenv
 
-load_dotenv("config.env")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(_BASE_DIR)
+load_dotenv(os.path.join(_BASE_DIR, "config.env"))
 
-GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
-FRESHRSS_URLS       = [u.strip() for u in os.getenv("FRESHRSS_URLS", "").split(",") if u.strip()]
-MAX_ITEMS_PER_FEED  = int(os.getenv("MAX_ITEMS_PER_FEED", "200"))
-DEDUP_THRESHOLD     = float(os.getenv("DEDUP_THRESHOLD", "0.78"))
-OUTPUT_DIR          = os.getenv("OUTPUT_DIR", "output").strip()
-SEND_TELEGRAM       = os.getenv("SEND_TELEGRAM", "false").lower() == "true"
-TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-MAX_PUSH_ITEMS      = int(os.getenv("MAX_PUSH_ITEMS", "15"))
-RECENT_HOURS        = int(os.getenv("RECENT_HOURS", "24"))
-MIN_ARTICLE_SCORE   = int(os.getenv("MIN_ARTICLE_SCORE", "0"))
-SENT_FILE           = os.getenv("SENT_FILE", "sent_articles.json").strip()
+GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL         = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+FRESHRSS_URLS        = [u.strip() for u in os.getenv("FRESHRSS_URLS", "").split(",") if u.strip()]
+MAX_ITEMS_PER_FEED   = int(os.getenv("MAX_ITEMS_PER_FEED", "200"))
+DEDUP_THRESHOLD      = float(os.getenv("DEDUP_THRESHOLD", "0.78"))
+OUTPUT_DIR           = os.getenv("OUTPUT_DIR", "output").strip()
+SEND_TELEGRAM        = os.getenv("SEND_TELEGRAM", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID     = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+MAX_PUSH_ITEMS       = int(os.getenv("MAX_PUSH_ITEMS", "15"))
+RECENT_HOURS         = int(os.getenv("RECENT_HOURS", "24"))
+MIN_ARTICLE_SCORE    = int(os.getenv("MIN_ARTICLE_SCORE", "0"))
+SENT_FILE            = os.getenv("SENT_FILE", "sent_articles.json").strip()
 SENT_RETENTION_HOURS = int(os.getenv("SENT_RETENTION_HOURS", "72"))
-LLM_RANK_LIMIT      = int(os.getenv("LLM_RANK_LIMIT", str(max(MAX_PUSH_ITEMS * 4, 50))))
-MIN_COMPANY_ITEMS   = int(os.getenv("MIN_COMPANY_ITEMS", "8"))
-MIN_AI_ITEMS        = int(os.getenv("MIN_AI_ITEMS", "8"))
-MIN_BLOG_ITEMS      = int(os.getenv("MIN_BLOG_ITEMS", "5"))
-HTTP_TIMEOUT        = int(os.getenv("HTTP_TIMEOUT", "25"))
-TELEGRAM_MAX_CHARS  = int(os.getenv("TELEGRAM_MAX_CHARS", "3900"))
+LLM_RANK_LIMIT       = int(os.getenv("LLM_RANK_LIMIT", str(max(MAX_PUSH_ITEMS * 4, 60))))
+MIN_COMPANY_ITEMS    = int(os.getenv("MIN_COMPANY_ITEMS", "8"))
+MIN_AI_ITEMS         = int(os.getenv("MIN_AI_ITEMS", "8"))
+MIN_BLOG_ITEMS       = int(os.getenv("MIN_BLOG_ITEMS", "5"))
+HTTP_TIMEOUT         = int(os.getenv("HTTP_TIMEOUT", "25"))
+TELEGRAM_MAX_CHARS   = int(os.getenv("TELEGRAM_MAX_CHARS", "3900"))
+
+# v10 常量
+MAX_BLOG_PRE_FILTER      = int(os.getenv("MAX_BLOG_PRE_FILTER", "40"))
+
+RAW_FEED_LIMIT           = int(os.getenv("RAW_FEED_LIMIT", "50"))
+TELEGRAM_RAW_BOT_TOKEN   = os.getenv("TELEGRAM_RAW_BOT_TOKEN", "").strip()
+TELEGRAM_RAW_CHAT_ID     = os.getenv("TELEGRAM_RAW_CHAT_ID", "").strip()
+
+# v13 新增常量
+MAX_ITEMS         = int(os.getenv("MAX_ITEMS", "40"))
+
+# v11 新增常量
+MIN_PER_COMPANY   = int(os.getenv("MIN_PER_COMPANY", "1"))
+MAX_PER_COMPANY   = int(os.getenv("MAX_PER_COMPANY", "20"))
+SOURCE_STATS_FILE = os.getenv("SOURCE_STATS_FILE", "source_stats.json").strip()
+SOURCE_REPORT_FILE = os.getenv("SOURCE_REPORT_FILE", "source_report.csv").strip()
+ENABLE_BRIEF      = os.getenv("ENABLE_BRIEF", "true").lower() == "true"
+
+# v13 dual mode: "digest"（默认，结构化推送）或 "source"（信息源评估，不推送）
+RUN_MODE = os.getenv("RUN_MODE", "digest").strip().lower()
 
 AI_KEYWORDS = [
     "ai", "llm", "gpt", "claude", "openai", "anthropic", "deepmind",
@@ -41,28 +65,35 @@ AI_KEYWORDS = [
     "generative ai", "multimodal", "reasoning model", "agent", "agents",
 ]
 
+# v11: 合并 v10 全部公司 + v11 扩展关键词 + 新增 Alibaba / ByteDance（共 14 家）
 COMPANY_KEYWORDS = {
-    "Shopee":       ["shopee", "sea limited", "sea group", "garena"],
+    "Shopee":       ["shopee", "sea limited", "sea group", "garena", "spx", "shopee express"],
     "TikTok Shop":  ["tiktok shop", "tiktok e-commerce", "tiktok commerce"],
-    "Tencent":      ["tencent", "wechat", "weixin", "video accounts", "hunyuan"],
-    "Coupang":      ["coupang", "rocket delivery"],
-    "MercadoLibre": ["mercadolibre", "meli", "mercado libre"],
+    "Tencent":      ["tencent", "wechat", "weixin", "video accounts", "hunyuan", "qq", "miniprogram", "tenpay"],
+    "Coupang":      ["coupang", "rocket delivery", "rocket wow", "coupang eats"],
+    "MercadoLibre": ["mercadolibre", "meli", "mercado libre", "mercado pago", "mercado envios"],
     "Amazon":       ["amazon", "aws", "prime video", "prime air"],
-    "AppLovin":     ["applovin"],
+    "AppLovin":     ["applovin", "axon", "app monetization"],
     "Temu":         ["temu", "pinduoduo", "pdd"],
+    "Alibaba":      ["alibaba", "aliexpress", "lazada", "taobao", "tmall", "alibaba group", "alipay", "ant group"],
+    "ByteDance":    ["bytedance", "douyin", "capcut", "lark suite"],
     "Meta":         ["meta", "facebook", "instagram", "whatsapp"],
     "Google":       ["google", "alphabet", "gemini", "deepmind", "youtube"],
     "Microsoft":    ["microsoft", "openai partnership", "copilot", "azure ai"],
     "Anthropic":    ["anthropic", "claude"],
 }
 
-# v9: 两层公司分桶 — 核心公司优先推送，Global Tech 单独成栏
+# 两层公司分桶 — 核心公司优先推送，Global Tech 单独成栏
 FOCUS_COMPANIES = {
     "Shopee", "TikTok Shop", "Tencent", "Coupang", "MercadoLibre", "AppLovin",
 }
 GLOBAL_TECH = {
     "Meta", "Google", "Microsoft", "Amazon", "Anthropic", "Temu",
+    "Alibaba", "ByteDance",   # v11 新增
 }
+
+# v11: 用于 enforce_company_quota 的公司名全集
+_ALL_COMPANY_NAMES = set(COMPANY_KEYWORDS.keys())
 
 HIGH_SIGNAL_WORDS = [
     "earnings", "regulation", "antitrust", "acquisition", "ipo", "policy",
@@ -426,6 +457,24 @@ def filter_already_sent(articles: list[dict], sent_store: dict) -> list[dict]:
     return result
 
 
+# v10: 快速预过滤，防止博客文章挤占 LLM ranking 配额
+def fast_filter(articles: list[dict]) -> list[dict]:
+    core = []   # company + AI + media（全保）
+    blogs = []  # blog（限量）
+    for a in articles:
+        text = (a.get("title", "") + " " + a.get("summary", "")).lower()
+        if detect_company(a) or any(k in text for k in AI_KEYWORDS) \
+                or a.get("source_type") == "media":
+            core.append(a)
+        elif a.get("source_type") == "blog":
+            blogs.append(a)
+        # source_type=="other" 且不含公司/AI关键词：丢弃
+    blogs.sort(key=lambda x: x.get("published_dt") or datetime.datetime.min, reverse=True)
+    result = core + blogs[:MAX_BLOG_PRE_FILTER]
+    print(f"[{now_str()}] [FAST FILTER] {len(articles)} → {len(result)} (core={len(core)}, blog≤{MAX_BLOG_PRE_FILTER})")
+    return result
+
+
 # ── Tagging + scoring ───────────────────────────────────────────
 
 def detect_company(article: dict) -> str | None:
@@ -463,7 +512,6 @@ def _keyword_score(article: dict) -> int:
     for w in MID_SIGNAL_WORDS:
         if w in text:
             score += 1
-    # v9: FOCUS_COMPANIES 额外加分，确保在 keyword fallback 场景下也能优先排序
     tag = article.get("company_tag")
     if tag in FOCUS_COMPANIES:
         score += 5
@@ -472,7 +520,11 @@ def _keyword_score(article: dict) -> int:
     if article.get("source_type") == "media":
         score += 1
     if article.get("source_type") == "blog":
-        score += 1  # give blogs a small floor so they are not all crowded out
+        score += 1
+    # Google News 聚合源降权（优先展示原始来源）
+    domain = domain_from_url(article.get("link", "")) or ""
+    if "news.google" in domain:
+        score -= 2
     return min(10, max(1, score))
 
 
@@ -483,23 +535,50 @@ def call_gemini(prompt: str) -> str:
         "https://generativelanguage.googleapis.com/v1beta/"
         f"models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
-    resp = requests.post(
-        url,
-        headers={"Content-Type": "application/json"},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        raise RuntimeError("Gemini 响应解析失败：\n" + json.dumps(data, ensure_ascii=False, indent=2))
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                import time
+                print(f"[WARN] Gemini attempt {attempt + 1} failed ({e}), retrying...")
+                time.sleep(2)
+    raise RuntimeError(f"Gemini 失败（3次重试后）: {last_err}")
 
 
-def llm_tag_and_rank(articles: list[dict], limit: int | None = None) -> list[dict]:
-    limit = limit or LLM_RANK_LIMIT
+def llm_tag_and_rank(articles: list[dict]) -> list[dict]:
     companies = list(COMPANY_KEYWORDS.keys())
+
+    # v13 source mode: 仅关键词分类，跳过 LLM，按时间排序（看真实分布）
+    if RUN_MODE == "source":
+        for a in articles:
+            _keyword_tag(a)
+            a["score"] = _keyword_score(a)
+        articles.sort(
+            key=lambda x: x.get("published_dt") or datetime.datetime.min,
+            reverse=True,
+        )
+        company_count = sum(1 for a in articles if a.get("category") == "company")
+        ai_count = sum(1 for a in articles if a.get("category") == "ai")
+        print(f"[{now_str()}] Source mode keyword tagged — Company:{company_count} | AI:{ai_count} | Total:{len(articles)}")
+        return articles
+
+    # v12 fix: 先跑关键词保底，LLM 只做升级，不做 destructive overwrite
+    for a in articles:
+        _keyword_tag(a)
+        a["keyword_category"] = a["category"]
+        a["keyword_company_tag"] = a["company_tag"]
+        a["score"] = _keyword_score(a)
 
     lines = []
     for i, a in enumerate(articles):
@@ -510,25 +589,19 @@ def llm_tag_and_rank(articles: list[dict], limit: int | None = None) -> list[dic
             f"   来源: {a.get('source_display') or a.get('source')}"
         )
 
-    prompt = f"""你是一名科技与互联网投研研究员。请对以下新闻分类并评分重要性。
+    prompt = f"""你是一名科技与互联网投研研究员。请对以下新闻分类。
 
 分类规则：
 - category="company"：涉及以下公司之一（填入company字段）：{", ".join(companies)}
 - category="ai"：涉及AI/LLM/机器学习/大模型/生成式AI等，company填"AI技术"
 - category="other"：其他新闻，company填"市场动态"
 
-重要性评分（1-10）：
-- 8-10：财报/监管/反垄断/收购/IPO/重大产品发布/CEO变动/重大商用落地
-- 5-7：战略合作/市场扩张/新功能/行业报告/关键产品更新
-- 1-4：普通资讯/观点文章/一般博客
-
-额外要求：
-- 不要因为是博客就全部打低分；若内容有明确方法论、技术拆解或行业洞见，可给 4-6 分
+要求：
 - 输出中必须覆盖全部新闻 id
 - 只输出 JSON 数组，不要任何解释
 
 格式：
-[{{"id":0,"category":"company","company":"Amazon","importance":8}}]
+[{{"id":0,"category":"company","company":"Amazon"}}]
 
 新闻：
 {chr(10).join(lines)}
@@ -547,20 +620,36 @@ def llm_tag_and_rank(articles: list[dict], limit: int | None = None) -> list[dic
             if idx is None or not (0 <= idx < len(articles)):
                 continue
             covered.add(idx)
-            articles[idx]["category"] = t.get("category", "other")
-            articles[idx]["company_tag"] = t.get("company", "市场动态")
-            # v9: 在 LLM 重要性分基础上，给核心公司文章额外加 2 分（上限 10）
-            base_score = min(10, max(1, int(t.get("importance", 5))))
-            focus_bonus = 2 if articles[idx].get("company_tag") in FOCUS_COMPANIES else 0
-            articles[idx]["score"] = min(10, base_score + focus_bonus)
+            llm_cat = t.get("category", "other")
+            llm_company = t.get("company", "市场动态")
+
+            # LLM upgrade-only：LLM 给 company/ai 时才覆盖，否则保留关键词结果
+            if llm_cat == "company" and llm_company in _ALL_COMPANY_NAMES:
+                articles[idx]["category"] = "company"
+                articles[idx]["company_tag"] = llm_company
+            elif llm_cat == "ai":
+                articles[idx]["category"] = "ai"
+                articles[idx]["company_tag"] = "AI技术"
+            else:
+                articles[idx]["category"] = articles[idx]["keyword_category"]
+                articles[idx]["company_tag"] = articles[idx]["keyword_company_tag"]
 
         for idx, a in enumerate(articles):
             if idx not in covered:
-                _keyword_tag(a)
-                a["score"] = _keyword_score(a)
+                a["category"] = a["keyword_category"]
+                a["company_tag"] = a["keyword_company_tag"]
 
     except Exception as e:
         print(f"[WARN] LLM tagging failed ({e}), falling back to keyword tagging")
+        for a in articles:
+            _keyword_tag(a)
+            a["score"] = _keyword_score(a)
+
+    # v12 fix: sanity check — 全部打为 other 时强制关键词回退
+    company_after = sum(1 for a in articles if a.get("category") == "company")
+    ai_after = sum(1 for a in articles if a.get("category") == "ai")
+    if company_after == 0 and ai_after == 0:
+        print("[WARN] LLM output looks invalid (all 'other'), fallback to keyword tagging")
         for a in articles:
             _keyword_tag(a)
             a["score"] = _keyword_score(a)
@@ -571,17 +660,63 @@ def llm_tag_and_rank(articles: list[dict], limit: int | None = None) -> list[dic
     focus_count = sum(1 for a in articles if a.get("company_tag") in FOCUS_COMPANIES)
     print(f"[{now_str()}] LLM tagged — Focus:{focus_count} | Company:{company_count} | AI:{ai_count} | Blog:{blog_count} | Total:{len(articles)}")
 
+    # v13: 轻排序 — FOCUS 优先 > 媒体来源 > 时间新旧
     articles.sort(
         key=lambda x: (
-            x.get("score", 0),
+            1 if x.get("company_tag") in FOCUS_COMPANIES else 0,
             1 if x.get("source_type") == "media" else 0,
             x.get("published_dt") or datetime.datetime.min,
         ),
         reverse=True,
     )
-    selected = articles[:limit]
-    print(f"[{now_str()}] After LLM ranking: top {len(selected)} (limit={limit})")
-    return selected
+    print(f"[{now_str()}] After LLM tagging: {len(articles)} articles (no truncation)")
+    return articles
+
+
+_SIGNAL_WORDS = [
+    "earnings", "revenue", "profit", "growth", "gmv",
+    "subsidy", "market share", "pricing", "discount",
+    "launch", "rollout", "expansion", "partnership",
+    "ai", "model", "gpt", "llm", "agent", "copilot",
+    "regulation", "antitrust", "ban", "policy",
+]
+
+_STRONG_AI_WORDS = ["artificial intelligence", " ai ", "llm", "gpt", "copilot", "anthropic", "openai", "deepmind"]
+
+
+def signal_filter(articles: list[dict]) -> list[dict]:
+    """保留含投研信号词的文章，剔除无关噪音。"""
+    result = []
+    for a in articles:
+        # company/blog 类文章不走信号过滤，直接保留
+        if a.get("category") == "company" or a.get("source_type") == "blog":
+            result.append(a)
+            continue
+        # LLM 漏标的公司文章：关键词命中也保留
+        if detect_company(a):
+            result.append(a)
+            continue
+        text = (a.get("title", "") + " " + a.get("summary", "")).lower()
+        if any(k in text for k in _SIGNAL_WORDS):
+            result.append(a)
+    print(f"[{now_str()}] Signal filter: {len(articles)} → {len(result)}")
+    return result
+
+
+def fix_ai_category(articles: list[dict]) -> list[dict]:
+    """对分类为 ai 的文章二次校验：若不含强 AI 关键词则降为 other。"""
+    fixed = 0
+    for a in articles:
+        if a.get("category") != "ai":
+            continue
+        text = (a.get("title", "") + " " + a.get("summary", "")).lower()
+        if not any(k in text for k in _STRONG_AI_WORDS):
+            a["category"] = "other"
+            a["company_tag"] = "市场动态"
+            fixed += 1
+    if fixed:
+        print(f"[{now_str()}] fix_ai_category: corrected {fixed} false-positive AI articles")
+    return articles
 
 
 def reserve_diverse_articles(ranked: list[dict]) -> list[dict]:
@@ -621,59 +756,177 @@ def reserve_diverse_articles(ranked: list[dict]) -> list[dict]:
     return selected
 
 
+# ── v11: Source stats ────────────────────────────────────────────
+
+def load_source_stats() -> dict:
+    try:
+        with open(SOURCE_STATS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        # v13: 迁移旧格式（total_score/top_hits → company_hits/ai_hits/media_hits）
+        for domain, s in raw.items():
+            if "total_score" in s and "company_hits" not in s:
+                raw[domain] = {
+                    "count": s.get("count", 0),
+                    "company_hits": 0,
+                    "ai_hits": 0,
+                    "media_hits": 0,
+                }
+        return raw
+    except Exception:
+        return {}
+
+
+def save_source_stats(stats: dict):
+    try:
+        with open(SOURCE_STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] Failed to save source stats: {e}")
+
+
+def update_source_stats(articles: list[dict]):
+    stats = load_source_stats()
+    for a in articles:
+        domain = a.get("domain") or "unknown"
+        if domain not in stats:
+            stats[domain] = {"count": 0, "company_hits": 0, "ai_hits": 0, "media_hits": 0}
+        stats[domain]["count"] += 1
+        if a.get("category") == "company":
+            stats[domain]["company_hits"] += 1
+        if a.get("category") == "ai":
+            stats[domain]["ai_hits"] += 1
+        if a.get("source_type") == "media":
+            stats[domain]["media_hits"] += 1
+    save_source_stats(stats)
+    print(f"[{now_str()}] Source stats updated ({len(articles)} articles, {len(stats)} domains total)")
+
+
+def export_source_report():
+    stats = load_source_stats()
+    if not stats:
+        return
+    rows = []
+    for domain, s in stats.items():
+        quality = (
+            s.get("company_hits", 0) * 3 +
+            s.get("ai_hits", 0) * 2 +
+            s.get("media_hits", 0) * 1
+        ) / max(1, s.get("count", 1))
+        rows.append((domain, s.get("count", 0), round(quality, 2),
+                     s.get("company_hits", 0), s.get("ai_hits", 0), s.get("media_hits", 0)))
+    rows.sort(key=lambda x: x[2], reverse=True)
+    try:
+        with open(SOURCE_REPORT_FILE, "w", encoding="utf-8") as f:
+            f.write("domain,count,quality_score,company_hits,ai_hits,media_hits\n")
+            for r in rows:
+                f.write(",".join(map(str, r)) + "\n")
+        print(f"[{now_str()}] Source report exported: {SOURCE_REPORT_FILE} ({len(rows)} domains)")
+    except Exception as e:
+        print(f"[WARN] Failed to export source report: {e}")
+
+
+def apply_source_score(articles: list[dict]) -> list[dict]:
+    """根据历史来源质量对文章分数做小幅加权（冷启动时无历史数据则跳过）。"""
+    stats = load_source_stats()
+    if not stats:
+        return articles
+    for a in articles:
+        domain = a.get("domain")
+        if domain and domain in stats:
+            s = stats[domain]
+            quality = (
+                s.get("company_hits", 0) * 3 +
+                s.get("ai_hits", 0) * 2 +
+                s.get("media_hits", 0) * 1
+            ) / max(1, s.get("count", 1))
+            a["score"] = a.get("score", 0) + quality * 0.3
+    articles.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return articles
+
+
+# ── v11: Company quota enforcement ──────────────────────────────
+
+def enforce_company_quota(articles: list[dict]) -> list[dict]:
+    """
+    对 COMPANY_KEYWORDS 中的每家公司保证最少 MIN_PER_COMPANY 篇、最多 MAX_PER_COMPANY 篇。
+    "AI技术"/"市场动态" 等非公司标签原样保留，不纳入配额管理。
+    """
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    others: list[dict] = []
+
+    for a in articles:
+        tag = a.get("company_tag", "")
+        if tag in _ALL_COMPANY_NAMES:
+            grouped[tag].append(a)
+        else:
+            others.append(a)
+
+    final: list[dict] = []
+    used: set[str] = set()
+
+    def _key(a: dict) -> str:
+        return a.get("link") or a.get("title_hash") or ""
+
+    # Step 1: 每家公司保证 MIN_PER_COMPANY 篇
+    for company, items in grouped.items():
+        for a in items[:MIN_PER_COMPANY]:
+            k = _key(a)
+            if k not in used:
+                final.append(a)
+                used.add(k)
+
+    # Step 2: 每家公司填到 MAX_PER_COMPANY 篇上限
+    for company, items in grouped.items():
+        count = sum(1 for a in final if a.get("company_tag") == company)
+        for a in items:
+            if count >= MAX_PER_COMPANY:
+                break
+            k = _key(a)
+            if k not in used:
+                final.append(a)
+                used.add(k)
+                count += 1
+
+    # 合并：公司文章 + 非公司文章（AI/blog 原样保留）
+    result = final + [a for a in others if _key(a) not in used]
+
+    company_counts = {
+        c: sum(1 for a in final if a.get("company_tag") == c)
+        for c in grouped if sum(1 for a in final if a.get("company_tag") == c) > 0
+    }
+    counts_str = " | ".join(f"{c}:{n}" for c, n in sorted(company_counts.items()))
+    print(f"[{now_str()}] [QUOTA] {counts_str} | total={len(result)}")
+    return result
+
+
 # ── Headline generation ─────────────────────────────────────────
 
-def build_company_grouped_headlines(articles: list[dict], ai_mode: bool = False) -> list[dict]:
+def build_company_grouped_headlines(articles: list[dict]) -> list[dict]:
     lines = []
     for i, a in enumerate(articles, 1):
+        content = a.get("summary", "")[:500]
         lines.append(
             f"{i}. [分类: {a.get('company_tag', '市场动态')}]\n"
             f"   标题: {a['title']}\n"
-            f"   摘要: {a['summary']}\n"
+            f"   摘要: {content}\n"
             f"   来源: {a.get('source_display') or a.get('source')}\n"
             f"   链接: {a['link']}"
         )
 
-    if ai_mode:
-        prompt = f"""你是一名AI技术分析师。请把下面的AI/技术新闻改写为精炼的中文投研 headline。
+    prompt = f"""你是一名投研分析师。将每条新闻改写为30-50字的中文一句话总结。
 
 要求：
-1. 每条新闻改写成一句话，包含：文章核心观点 + 关键技术概念 + 行业影响
-2. 分类已在"[分类: ...]"字段中标注，按此分组输出，不要改变分组
+1. 结构：事件 + 变化 + 影响
+2. 按"[分类: ...]"字段分组输出，不要改变分组
 3. 每条新闻保留 source 和 link
-4. 语言简洁清晰，适合投资研究阅读
-5. 所有 headline 必须用中文输出（即使原文是英文）
-6. 只输出 JSON，不要任何解释
-
-格式：
-[
-  {{
-    "company": "AI技术",
-    "items": [
-      {{"headline": "Anthropic在非高峰时段临时上调Claude使用配额，反映其通过流量调度提升算力利用率", "source": "Engadget", "link": "https://example.com"}}
-    ]
-  }}
-]
-
-新闻：
-{chr(10).join(lines)}
-"""
-    else:
-        prompt = f"""你是一名中文投研新闻编辑。请把下面的新闻改写为精炼的中文投研 headline。
-
-要求：
-1. 每条新闻改写成一句话：事件 + 可能的影响
-2. 分类已在"[分类: ...]"字段中标注，按此分组输出，不要改变分组
-3. 每条新闻保留 source 和 link
-4. 所有 headline 必须用中文输出（即使原文是英文）
-5. 只输出 JSON，不要任何解释
+4. 只输出 JSON，不要任何解释
 
 格式：
 [
   {{
     "company": "Amazon",
     "items": [
-      {{"headline": "Amazon扩大Prime视频内容投入，或加大对流媒体留存与生态协同的布局", "source": "Reuters", "link": "https://example.com"}}
+      {{"headline": "Amazon宣布扩大Prime会员权益，将电商与流媒体捆绑销售以提升用户留存。", "source": "Reuters", "link": "https://example.com"}}
     ]
   }}
 ]
@@ -688,7 +941,6 @@ def build_company_grouped_headlines(articles: list[dict], ai_mode: bool = False)
         if not match:
             raise ValueError("Gemini 未返回 JSON 数组")
         data = json.loads(match.group(0))
-        # Prefer the original article's source_display over whatever Gemini returned.
         link_to_src = {
             a.get("link", ""): (a.get("source_display") or a.get("source", ""))
             for a in articles
@@ -844,7 +1096,6 @@ def send_telegram(text: str):
     print(f"[{now_str()}] Telegram sent.")
 
 
-# v9: 4 条消息分桶推送
 def send_four_messages(
     focus_grouped: list[dict],
     global_grouped: list[dict],
@@ -867,11 +1118,77 @@ def send_four_messages(
             send_telegram(f"📖 <b>博客精选</b> {today}\n\n" + blog_text)
 
 
+# v10: Bot1 原始 feed 推送（多条消息分批，按时间倒序）
+def send_raw_feed(articles: list[dict]):
+    token = TELEGRAM_RAW_BOT_TOKEN
+    chat_id = TELEGRAM_RAW_CHAT_ID
+    if not token or not chat_id:
+        print("[BOT1 RAW] skipped (no TELEGRAM_RAW_BOT_TOKEN/CHAT_ID configured)")
+        return
+
+    sorted_arts = sorted(
+        articles,
+        key=lambda x: x.get("published_dt") or datetime.datetime.min,
+        reverse=True,
+    )[:RAW_FEED_LIMIT]
+
+    today = now_local().strftime("%Y-%m-%d")
+    header = f"📰 <b>最新资讯</b> {today}（{len(sorted_arts)} 条）\n\n"
+
+    lines = []
+    for a in sorted_arts:
+        title = escape_html(a["title"])
+        source = escape_html(a.get("source_display") or a.get("source", ""))
+        link = a.get("link", "")
+        if link:
+            lines.append(f'• {title}（<a href="{html.escape(link, quote=True)}">{source}</a>）')
+        else:
+            lines.append(f"• {title}（{source}）")
+
+    current = header
+    sent_count = 0
+    for line in lines:
+        addition = line + "\n"
+        if len(current) + len(addition) > TELEGRAM_MAX_CHARS and current.strip():
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": current.strip(),
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=15,
+                ).raise_for_status()
+                sent_count += 1
+            except Exception as e:
+                print(f"[BOT1 RAW] Send error: {e}")
+            current = ""
+        current += addition
+
+    if current.strip():
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": current.strip(),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            ).raise_for_status()
+            sent_count += 1
+        except Exception as e:
+            print(f"[BOT1 RAW] Send error: {e}")
+
+    print(f"[BOT1 RAW] Sent {len(sorted_arts)} articles in {sent_count} message(s)")
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 def main():
-    # Ensure we run from the script's own directory so config.env is always found.
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     ensure_dirs()
     import logging
     logging.basicConfig(
@@ -879,7 +1196,8 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    logging.info("=== digest start ===")
+    logging.info("=== digest v13 start ===")
+    print(f"[{now_str()}] RUN_MODE={RUN_MODE}")
     if not FRESHRSS_URLS:
         raise EnvironmentError("请在 config.env 中设置 FRESHRSS_URLS")
 
@@ -888,25 +1206,67 @@ def main():
     articles = fetch_all_feeds(FRESHRSS_URLS)
     articles = filter_recent(articles, hours=RECENT_HOURS)
     articles = dedupe(articles, threshold=DEDUP_THRESHOLD)
-    articles_new = filter_already_sent(articles, sent_store)
+    # source mode 不过滤已推送，看真实分布；digest mode 正常过滤
+    if RUN_MODE == "source":
+        articles_new = articles
+    else:
+        articles_new = filter_already_sent(articles, sent_store)
 
     if not articles_new:
-        print(f"[{now_str()}] No new articles to push.")
+        print(f"[{now_str()}] No articles to process.")
         return
 
-    ranked = llm_tag_and_rank(articles_new)
+    # Bot1: 发送原始 feed（仅 digest mode）
+    if RUN_MODE == "digest" and SEND_TELEGRAM:
+        send_raw_feed(articles_new)
 
-    if MIN_ARTICLE_SCORE > 0:
-        ranked = [a for a in ranked if a.get("score", 0) >= MIN_ARTICLE_SCORE]
-        print(f"[{now_str()}] After score filter (>={MIN_ARTICLE_SCORE}): {len(ranked)}")
+    # v10: fast_filter 防止博客挤占 LLM 配额（source mode 跳过，保留全量）
+    if RUN_MODE == "digest":
+        articles_filtered = fast_filter(articles_new)
+    else:
+        articles_filtered = articles_new
+
+    ranked = llm_tag_and_rank(articles_filtered)
+
+    # source mode: 更新统计后退出，不发 Telegram，不写 sent
+    if RUN_MODE == "source":
+        update_source_stats(ranked)
+        export_source_report()
+        company_count = sum(1 for a in ranked if a.get("category") == "company")
+        ai_count = sum(1 for a in ranked if a.get("category") == "ai")
+        blog_count = sum(1 for a in ranked if a.get("source_type") == "blog")
+        print(
+            f"[{now_str()}] Source mode done — "
+            f"Company:{company_count} | AI:{ai_count} | Blog:{blog_count} | Total:{len(ranked)}"
+        )
+        print(f"[{now_str()}] Report: {SOURCE_REPORT_FILE}")
+        return
 
     if not ranked:
-        print(f"[{now_str()}] No articles passed quality gate, skipping.")
+        print(f"[{now_str()}] No articles after LLM tagging, skipping.")
         return
+
+    # v13.2: 修正误判为 AI 的文章
+    ranked = fix_ai_category(ranked)
+
+    # v13.2: 信号过滤（剔除无投研价值的噪音）
+    ranked = signal_filter(ranked)
+
+    if not ranked:
+        print(f"[{now_str()}] No articles passed signal filter, skipping.")
+        return
+
+    # v13.2: 总量上限（在 bucket 前截断）
+    if len(ranked) > MAX_ITEMS:
+        ranked = ranked[:MAX_ITEMS]
+        print(f"[{now_str()}] Capped to MAX_ITEMS={MAX_ITEMS}")
+
+    # v11: 公司配额保证（每家公司 MIN_PER_COMPANY ~ MAX_PER_COMPANY 篇）
+    ranked = enforce_company_quota(ranked)
 
     ranked = reserve_diverse_articles(ranked)
 
-    # v9: 4 桶分发，每篇文章只进入第一个匹配的桶
+    # 4 桶分发，每篇文章只进入第一个匹配的桶
     focus_articles, global_articles, ai_articles, blog_articles = [], [], [], []
     seen_keys: set[str] = set()
 
@@ -927,7 +1287,7 @@ def main():
         elif src == "blog":
             blog_articles.append(a)
         else:
-            continue  # "other" 类不推送，也不记入 sent
+            ai_articles.append(a)  # 通过 signal_filter 的 other 类归入 AI 桶
 
         seen_keys.add(key)
 
@@ -953,7 +1313,7 @@ def main():
         digest_files.append(save_markdown_digest(global_grouped, global_articles, label="global-digest"))
 
     if ai_articles:
-        ai_grouped = build_company_grouped_headlines(ai_articles, ai_mode=True)
+        ai_grouped = build_company_grouped_headlines(ai_articles)
         digest_files.append(save_markdown_digest(ai_grouped, ai_articles, label="ai-digest"))
 
     if blog_articles:
@@ -961,7 +1321,7 @@ def main():
         digest_files.append(save_markdown_digest(blog_grouped, blog_articles, label="blog-digest"))
 
     brief_file = None
-    if focus_articles:
+    if focus_articles and ENABLE_BRIEF:
         try:
             brief_text = build_brief(focus_articles)
             brief_file = save_markdown_brief(brief_text, focus_articles)
@@ -972,6 +1332,10 @@ def main():
     actually_sent = focus_articles + global_articles + ai_articles + blog_articles
     sent_store = update_sent_store(sent_store, actually_sent)
     save_sent(sent_store)
+
+    # v11: 更新来源统计并导出报告
+    update_source_stats(actually_sent)
+    export_source_report()
 
     send_four_messages(focus_grouped, global_grouped, ai_grouped, blog_grouped or None)
 
